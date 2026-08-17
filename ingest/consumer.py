@@ -68,19 +68,30 @@ create table if not exists {TABLE} (
 def write_batch(con: duckdb.DuckDBPyConnection, batch: list[dict]) -> None:
     """Ghi một lô message xuống kho — nhiệm vụ 5, hạng mục (b).
 
-    Câu lệnh hiện tại là INSERT thuần: ghi lại cùng một event_id sẽ tạo thêm
-    một hàng mới. Xem khung mã giả ở đầu file.
+    Phép ghi idempotent dạng DELETE + INSERT theo khoá `event_id`:
+      - DELETE ... WHERE event_id IN (các id của lô) rồi INSERT lại cả lô;
+      - phát lại một lô (do crash giữa write và commit) sẽ xoá đúng dòng cũ rồi
+        ghi bản mới => không trùng, không mất, nội dung mới thắng (ngữ nghĩa
+        tương đương `ON CONFLICT ... DO UPDATE`).
+
+    Hai quyết định để chạy nhanh trên DuckDB (đo được):
+      - KHÔNG dùng `ON CONFLICT`/primary key: DuckDB kiểm tra uniqueness từng
+        dòng làm mỗi lô hàng trăm dòng chậm ~6s;
+      - gộp cả lô vào MỘT câu INSERT multi-VALUES (executemany chậm hơn ~5x).
     """
-    con.executemany(
-        f"insert into {TABLE} values (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                r["event_id"], r["ticket_id"], r["customer_id"], r["customer_name"],
-                r["event_type"], r["latency_ms"], r["event_time"], r["_ingested_at"],
-            )
-            for r in batch
-        ],
-    )
+    if not batch:
+        return
+    ids = [r["event_id"] for r in batch]
+    ph = ", ".join("?" for _ in ids)
+    con.execute(f"delete from {TABLE} where event_id in ({ph})", ids)
+    values = ", ".join("(?, ?, ?, ?, ?, ?, ?, ?)" for _ in batch)
+    params = [
+        v for r in batch for v in (
+            r["event_id"], r["ticket_id"], r["customer_id"], r["customer_name"],
+            r["event_type"], r["latency_ms"], r["event_time"], r["_ingested_at"],
+        )
+    ]
+    con.execute(f"insert into {TABLE} values {values}", params)
 
 
 def maybe_crash(batch_no: int, crash_at: int | None) -> None:
@@ -110,11 +121,13 @@ def consume(
             batch_no += 1
 
             # ── KHỐI CẦN XEM XÉT — nhiệm vụ 5, hạng mục (a) ───────────────
-            # Ba dòng dưới đây được phép sắp xếp lại. maybe_crash() mô phỏng
-            # `kill -9`: tiến trình chết ngay tại vị trí của nó, không rollback.
-            consumer.commit()                 # ghi nhận offset
-            maybe_crash(batch_no, crash_at)   # sự cố xảy ra tại đây
+            # Đảo thứ tự để đạt at-least-once: GHI DỮ LIỆU trước, COMMIT offset
+            # sau. maybe_crash() mô phỏng `kill -9`: nếu chết giữa write và
+            # commit, lần khởi động lại sẽ đọc lại lô đó từ offset cũ — phép
+            # ghi idempotent (ON CONFLICT) bảo đảm phát lại không tạo hàng trùng.
             write_batch(con, batch)           # ghi dữ liệu
+            maybe_crash(batch_no, crash_at)   # sự cố có thể xảy ra giữa 2 bước
+            consumer.commit()                 # ghi nhận offset sau khi ghi xong
             # ─────────────────────────────────────────────────────────────
 
             written += len(batch)

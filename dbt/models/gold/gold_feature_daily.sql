@@ -30,8 +30,10 @@
 -- ---------------------------------------------------------------------------
 
 {{ config(
-    materialized     = 'incremental',
-    on_schema_change = 'fail'
+    materialized         = 'incremental',
+    on_schema_change     = 'fail',
+    unique_key           = ['event_date', 'customer_id'],
+    incremental_strategy = 'merge'
 ) }}
 
 select
@@ -49,7 +51,10 @@ select
 from {{ ref('silver_events') }}
 
 {% if is_incremental() %}
-where event_date > (select max(event_date) from {{ this }})
+-- Lùi 3 ngày so với max(event_date) hiện có, vì P99(độ trễ) = 2.73 ngày:
+-- event "xảy ra ngày cũ, tới kho muộn" vẫn được tính lại. Merge theo
+-- (event_date, customer_id) giúp tính lại mà không cộng dồn.
+where event_date >= (select max(event_date) from {{ this }}) - interval 3 day
 {% endif %}
 
 group by 1, 2, 3, 4

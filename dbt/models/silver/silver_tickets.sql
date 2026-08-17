@@ -45,6 +45,10 @@ with ranked as (
             order by event_time desc, cdc_seq desc
         ) as _rn
     from {{ source('bronze', 'bronze_tickets_cdc') }}
+    -- Lọc bản ghi không chuẩn hoá được (normalize_priority -> NULL) TRƯỚC khi
+    -- xếp hạng, để ticket vẫn giữ trạng thái hợp lệ từ bản ghi cũ hơn. Gọi lại
+    -- đúng macro mà quarantine_tickets dùng => hai model không thể lệch nhau.
+    where {{ normalize_priority('priority_raw') }} is not null
 
 ),
 
