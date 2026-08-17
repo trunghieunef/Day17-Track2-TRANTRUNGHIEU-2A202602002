@@ -61,7 +61,10 @@ setup:  ## venv + thư viện + sinh dữ liệu (chạy một lần)
 	@$(SYSPY) -m venv $(VENV)
 	@$(PIP) install -q --upgrade pip
 	@$(PIP) install -q -r requirements.txt
-	@$(PY) seed/generate.py
+	# --extra để sinh luôn data/gold_events/: nếu không, `make verify` trên một
+	# bản clone sạch (chưa chạy `make seed-extra`) sẽ văng lỗi
+	# "No files found that match .../gold_events/**/*.parquet" khi đo dashboard.
+	@$(PY) seed/generate.py --extra
 	@echo ""
 	@echo "  xong. Bước tiếp theo:  make pipeline  rồi  make verify"
 
